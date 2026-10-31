@@ -658,34 +658,90 @@
     toastTimer = setTimeout(() => { el.className = 'toast'; }, 1800);
   }
 
-  let actx = null;
+  // ---------- 音 ----------
+  // スマホのブラウザは「画面をタッチしている最中」にしか音を出す準備（AudioContext の再開）を許さない。
+  // CPU の手は タッチの あとで 指されるので、タッチのたびに 準備しておく。
+  let actx = null, out = null;
+  function audio() {
+    if (!actx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      actx = new AC();
+      // 小さなスピーカーでも聞こえるよう、まとめて音量をそろえる
+      const comp = actx.createDynamicsCompressor();
+      out = actx.createGain();
+      out.gain.value = 1;
+      out.connect(comp).connect(actx.destination);
+    }
+    if (actx.state !== 'running') {
+      const p = actx.resume();
+      if (p && p.catch) p.catch(() => {});
+    }
+    return actx;
+  }
+  function unlockAudio() {
+    if (!app.settings.sound) return;
+    try {
+      // iPhone：マナーモード（消音スイッチ）でも ゲームの音が出るようにする（Safari 17 以降）
+      if (navigator.audioSession && navigator.audioSession.type !== 'playback') navigator.audioSession.type = 'playback';
+      const a = audio();
+      if (!a || a._unlocked) return;
+      // 古い iOS は、タッチ中に 1度 音を鳴らすと 以後 鳴らせるようになる（無音を鳴らす）
+      const src = a.createBufferSource();
+      src.buffer = a.createBuffer(1, 1, 22050);
+      src.connect(a.destination);
+      src.start(0);
+      a._unlocked = true;
+    } catch (e) { /* 音が出せない環境では鳴らさない */ }
+  }
+  for (const ev of ['pointerdown', 'touchend', 'mousedown', 'keydown']) {
+    document.addEventListener(ev, unlockAudio, { capture: true, passive: true });
+  }
+
   function tone(freq, start, dur, type, vol) {
-    const t0 = actx.currentTime + start;
+    const t0 = actx.currentTime + 0.01 + start;
     const o = actx.createOscillator();
     const g = actx.createGain();
     o.type = type || 'triangle';
     o.frequency.setValueAtTime(freq, t0);
-    g.gain.setValueAtTime(vol || 0.25, t0);
-    g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
-    o.connect(g).connect(actx.destination);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(vol || 0.25, t0 + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g).connect(out);
     o.start(t0);
     o.stop(t0 + dur + 0.02);
-    return o;
+    return { o, t0 };
+  }
+  // 駒を置く「コツン」：短い ノイズ ＋ 低い音
+  function knock() {
+    const t0 = actx.currentTime + 0.01;
+    const len = Math.floor(actx.sampleRate * 0.05);
+    const buf = actx.createBuffer(1, len, actx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3);
+    const src = actx.createBufferSource();
+    src.buffer = buf;
+    const bp = actx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = 1600; bp.Q.value = 0.8;
+    const g = actx.createGain();
+    g.gain.value = 1.4;
+    src.connect(bp).connect(g).connect(out);
+    src.start(t0);
+    const t = tone(320, 0, 0.12, 'triangle', 0.7);
+    t.o.frequency.exponentialRampToValueAtTime(110, t.t0 + 0.1);
   }
   function sound(kind) {
     if (!app.settings.sound) return;
     try {
-      actx = actx || new (window.AudioContext || window.webkitAudioContext)();
-      if (actx.state === 'suspended') actx.resume();
+      if (!audio()) return;
       if (kind === 'move') {
-        const o = tone(700, 0, 0.09, 'triangle', 0.3);
-        o.frequency.exponentialRampToValueAtTime(140, actx.currentTime + 0.08);
+        knock();
       } else if (kind === 'check') {
-        tone(660, 0.05, 0.15, 'square', 0.08); tone(880, 0.2, 0.2, 'square', 0.08);
+        tone(660, 0.05, 0.15, 'square', 0.18); tone(880, 0.2, 0.2, 'square', 0.18);
       } else if (kind === 'win') {
-        [523, 659, 784, 1047].forEach((f, i) => tone(f, i * 0.13, 0.3, 'triangle', 0.22));
+        [523, 659, 784, 1047].forEach((f, i) => tone(f, i * 0.13, 0.3, 'triangle', 0.4));
       } else if (kind === 'lose') {
-        [392, 330, 262].forEach((f, i) => tone(f, i * 0.18, 0.35, 'sine', 0.2));
+        [392, 330, 262].forEach((f, i) => tone(f, i * 0.18, 0.35, 'sine', 0.4));
       }
     } catch (e) { /* 音が出せない環境では鳴らさない */ }
   }
